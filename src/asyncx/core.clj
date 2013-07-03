@@ -1,8 +1,14 @@
 (ns asyncx.core
-  (:refer-clojure :exclude [iterate range concat repeat reduce count min max
+  (:refer-clojure :exclude [into reductions iterate range concat repeat reduce count min max
                             take take-while drop drop-while map mapcat])
-  (:require [clojure.core.async :as async
-             :refer [<! >! timeout chan alt! alts! close! go]]))
+  (:require [clojure.core.reducers :as r]
+            [ clojure.core.protocols :as coreproto]
+            [clojure.core.async.impl.channels :as channels]
+            [clojure.core.async.impl.channels :as mmc]
+   [clojure.core.async :as async
+    :refer [<! >! timeout chan alt! alts! close! go]]))
+
+
 
 (defmacro if-recv
   "Reads from port, binding to name. Evaluates the then block if the
@@ -199,6 +205,105 @@
           (recur (f acc x))
           acc)))))
 
+(defn reductions
+  "Returns a channel which will receive one item as if by clojure.core/reductions.
+  Consumes port."
+  ([f port]
+   (go
+     (when-recv [init port]
+       (<! (reductions f init port)))))
+  ([f init port]
+    (go-as c
+      (loop [acc init]
+        (if-recv [x port]
+                 (let [temp (f acc x)]
+                   (>! c temp)
+                   (recur temp)
+                   )
+                 )))))
+
+(extend-protocol coreproto/CollReduce
+  clojure.core.async.impl.channels.ManyToManyChannel
+  (coll-reduce
+    ([port f]
+       (reductions f port))
+    ([port f val]
+       (reductions f val port)
+       )))
+#_(declare map)
+#_(defn into
+  "Returns a new coll consisting of to-coll with all of the items of
+  from-coll conjoined."
+  {:added "1.0"
+   :static true}
+  [to from]
+  (if (instance? clojure.lang.IEditableCollection to)
+    (let [temp (clojure.core/reduce conj! (transient to) from)]
+      (if (instance? clojure.core.async.impl.channels.ManyToManyChannel temp)
+        (map (fn [item] (with-meta (persistent! item) (meta to))) temp)
+        (with-meta (persistent! temp) (meta to))
+     ))
+    (clojure.core/reduce conj to from)))
+(defn into
+  "Returns a new coll consisting of to-coll with all of the items of
+  from-coll conjoined."
+  {:added "1.0"
+   :static true}
+  [to from]
+  (clojure.core/reduce conj to from))
+
+(defn test3 []
+  (let [testchan (chan)
+        out (r/reduce + (r/map inc (r/mapcat identity [[5 3 5] testchan])))
+        ]
+    (go (>! testchan 1)
+        (>! testchan 2)
+        (>! testchan 3)
+        (>! testchan 4))
+
+    (each (fn [result] (println result)) out)
+    testchan
+    ;output
+    ;18
+    ;21
+    ;25
+    ;30
+    ))
+(defn test4 []
+  (let [testchan (chan)
+        out (r/reduce + (r/mapcat identity testchan))
+        ]
+
+    (go (>! testchan [1 2 3])
+        (>! testchan [2 3 4])
+        (>! testchan [])
+        (>! testchan []))
+    (each (fn [result] (println result)) out)
+    testchan
+    ;output
+    ;6
+    ;15
+    ;15
+    ;15
+    ))
+(defn testinto []
+  (let [testchan (chan)
+        out (into #{} testchan)
+        ;out (r/reduce + (r/mapcat identity testchan))
+        ]
+
+    (go (>! testchan 1)
+        (>! testchan 2)
+        (>! testchan 3)
+        (>! testchan 4))
+    (each (fn [result] (println result)) out)
+    testchan
+    ;prints
+    ;#{1}
+    ;#{1 2}
+    ;#{1 2 3}
+    ;#{1 2 3 4}
+    ))
 (defn count
   "Puts the number of items consumed from port on to the returned channel."
   [port]
